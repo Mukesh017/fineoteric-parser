@@ -261,26 +261,14 @@ def parse_email():
     sender_email = data.get('sender', '')
     entry_date = data.get('date', '')
 
-    print("HTML LENGTH:", len(html_body))
-    print("HTML SAMPLE:")
-    print(html_body[:1000])
-    
-    print("TABLE COUNT:", len(BeautifulSoup(html_body, "html.parser").find_all("table")))
-    
-    records = parse_email_html(html_body, sender_email, entry_date)
-
-    if not records:
-        return jsonify({
-            'success': False,
-            'message': 'No disbursement table found in this email',
-            'records': []
-        })
-
     return jsonify({
-        'success': True,
-        'count': len(records),
-        'records': records
+        "success": True,
+        "html_length": len(html_body),
+        "table_count": len(BeautifulSoup(html_body, "html.parser").find_all("table")),
+        "records": []
     })
+
+    records = parse_email_html(html_body, sender_email, entry_date)
 
 # ── Health check ─────────────────────────────────────────────────────────────
 @app.route('/health', methods=['GET'])
