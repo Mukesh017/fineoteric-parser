@@ -277,13 +277,17 @@ def parse_email():
     })
 
 # ── Health check ─────────────────────────────────────────────────────────────
-
-
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'running', 'service': 'Fineoteric Email Parser'})
 
+# ── Root route ───────────────────────────────────────────────────────────────
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({'status': 'running', 'service': 'Fineoteric Email Parser'})
 
 # ── Run ──────────────────────────────────────────────────────────────────────
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000, debug=True)
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
