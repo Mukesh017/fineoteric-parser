@@ -262,8 +262,11 @@ def parse_email():
     entry_date = data.get('date', '')
 
     print("HTML LENGTH:", len(html_body))
+    print("HTML SAMPLE:")
     print(html_body[:1000])
-
+    
+    print("TABLE COUNT:", len(BeautifulSoup(html_body, "html.parser").find_all("table")))
+    
     records = parse_email_html(html_body, sender_email, entry_date)
 
     if not records:
