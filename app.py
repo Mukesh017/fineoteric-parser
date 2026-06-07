@@ -198,12 +198,12 @@ def parse_email_html(html_body, sender_email="", entry_date=""):
 
 @app.route('/parse-email', methods=['POST'])
 def parse_email():
-    # Accept both JSON and form-data
-    if request.content_type and 'multipart/form-data' in request.content_type:
-        html_body = request.form.get('html_body', '')
-        sender_email = request.form.get('sender', '')
-        entry_date = request.form.get('date', '')
-    else:
+    # Try form-data first, then JSON
+    html_body = request.form.get('html_body', '')
+    sender_email = request.form.get('sender', '')
+    entry_date = request.form.get('date', '')
+
+    if not html_body:
         data = request.get_json(force=True, silent=True) or {}
         html_body = data.get('html_body', '')
         sender_email = data.get('sender', '')
