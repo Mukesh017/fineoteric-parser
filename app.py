@@ -261,6 +261,9 @@ def parse_email():
     sender_email = data.get('sender', '')
     entry_date = data.get('date', '')
 
+    print("HTML LENGTH:", len(html_body))
+    print(html_body[:1000])
+
     records = parse_email_html(html_body, sender_email, entry_date)
 
     if not records:
