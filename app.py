@@ -199,27 +199,26 @@ def parse_email_html(html_body, sender_email="", entry_date=""):
 
 @app.route('/parse-email', methods=['POST'])
 def parse_email():
-    # Read raw bytes and decode — works regardless of Content-Type header
-    raw = request.get_data(as_text=True)
+    # Try form data first (application/x-www-form-urlencoded)
+    html_body = request.form.get('html_body', '')
+    sender_email = request.form.get('sender', '')
+    entry_date = request.form.get('date', '')
 
-    try:
-        data = json.loads(raw)
-    except Exception:
-        return jsonify({
-            'success': False,
-            'error': 'Could not parse request body as JSON',
-            'received_preview': raw[:200],
-            'records': []
-        }), 400
-
-    html_body = data.get('html_body', '')
-    sender_email = data.get('sender', '')
-    entry_date = data.get('date', '')
+    # If not form data, try raw JSON
+    if not html_body:
+        raw = request.get_data(as_text=True)
+        try:
+            data = json.loads(raw)
+            html_body = data.get('html_body', '')
+            sender_email = data.get('sender', '')
+            entry_date = data.get('date', '')
+        except Exception:
+            pass
 
     if not html_body:
         return jsonify({
             'success': False,
-            'error': 'html_body field is required',
+            'error': 'html_body is required',
             'records': []
         }), 400
 
@@ -228,9 +227,8 @@ def parse_email():
     if not records:
         return jsonify({
             'success': False,
-            'message': 'No disbursement table found in this email',
+            'message': 'No disbursement table found',
             'html_length': len(html_body),
-            'table_count': len(BeautifulSoup(html_body, 'html.parser').find_all('table')),
             'records': []
         })
 
