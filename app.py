@@ -1,9 +1,10 @@
-from flask import Flask, request, jsonify
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from bs4 import BeautifulSoup
 import re
 import json
 
-app = Flask(__name__)
+app = FastAPI()
 
 STANDARD_ROW = {
     "SR NO":                    "N/A",
@@ -100,7 +101,7 @@ FIELD_MAP = {
     "otc/pdd clearnce ( na / cleared/no)":  "N/A",
     "cheque handover stauts ( yes / no)":   "N/A",
     "cheque handover date":                 "N/A",
-    "subvention ( if any )":                "N/A",
+    "subvention ( if any )":               "N/A",
     "disbursed type ( part / full )":       "N/A",
 }
 
@@ -197,42 +198,48 @@ def parse_email_html(html_body, sender_email="", entry_date=""):
     return records
 
 
-@app.route('/parse-email', methods=['POST'])
-def parse_email():
-    # Read raw body directly — ignore Content-Type completely
-    raw = request.get_data(as_text=True)
+@app.post("/parse-email")
+async def parse_email(request: Request):
+    # Read raw body — accept ANY content type
+    raw = await request.body()
+    raw_text = raw.decode('utf-8', errors='replace')
 
-    # Try JSON parse
+    html_body = ''
+    sender_email = ''
+    entry_date = ''
+
+    # Try JSON first
     try:
-        data = json.loads(raw)
+        data = json.loads(raw_text)
+        html_body = data.get('html_body', '')
+        sender_email = data.get('sender', '')
+        entry_date = data.get('date', '')
     except Exception:
-        # Try form-urlencoded parse manually
+        pass
+
+    # Try form-urlencoded if JSON failed
+    if not html_body:
         try:
             from urllib.parse import parse_qs
-            parsed = parse_qs(raw)
-            data = {k: v[0] for k, v in parsed.items()}
+            parsed = parse_qs(raw_text)
+            html_body = parsed.get('html_body', [''])[0]
+            sender_email = parsed.get('sender', [''])[0]
+            entry_date = parsed.get('date', [''])[0]
         except Exception:
-            return jsonify({
-                'success': False,
-                'error': 'Could not parse request body',
-                'records': []
-            }), 400
-
-    html_body = data.get('html_body', '')
-    sender_email = data.get('sender', '')
-    entry_date = data.get('date', '')
+            pass
 
     if not html_body:
-        return jsonify({
+        return JSONResponse({
             'success': False,
             'error': 'html_body is required',
+            'raw_preview': raw_text[:300],
             'records': []
-        }), 400
+        }, status_code=400)
 
     records = parse_email_html(html_body, sender_email, entry_date)
 
     if not records:
-        return jsonify({
+        return JSONResponse({
             'success': False,
             'message': 'No disbursement table found',
             'html_length': len(html_body),
@@ -240,24 +247,18 @@ def parse_email():
             'records': []
         })
 
-    return jsonify({
+    return JSONResponse({
         'success': True,
         'record_count': len(records),
         'records': records
     })
 
 
-@app.route('/health', methods=['GET'])
+@app.get("/health")
 def health():
-    return jsonify({'status': 'running', 'service': 'Fineoteric Email Parser'})
+    return {"status": "running", "service": "Fineoteric Email Parser"}
 
 
-@app.route('/', methods=['GET'])
+@app.get("/")
 def home():
-    return jsonify({'status': 'running', 'service': 'Fineoteric Email Parser'})
-
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000, debug=True)
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000, debug=True)
+    return {"status": "running", "service": "Fineoteric Email Parser"}
