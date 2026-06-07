@@ -90,7 +90,7 @@ FIELD_MAP = {
     "sanction date":                        "N/A",
     "payout":                               "Payout %",
     "status":                               "STATUS",
-    "status of application":               "STATUS",
+    "status of application":                "STATUS",
     "finnone stage":                        "STATUS",
     "tenure":                               "N/A",
     "loan tenure approved":                 "N/A",
@@ -199,21 +199,28 @@ def parse_email_html(html_body, sender_email="", entry_date=""):
 
 @app.route('/parse-email', methods=['POST'])
 def parse_email():
-    # Try form data first (application/x-www-form-urlencoded)
-    html_body = request.form.get('html_body', '')
-    sender_email = request.form.get('sender', '')
-    entry_date = request.form.get('date', '')
+    # Read raw body directly — ignore Content-Type completely
+    raw = request.get_data(as_text=True)
 
-    # If not form data, try raw JSON
-    if not html_body:
-        raw = request.get_data(as_text=True)
+    # Try JSON parse
+    try:
+        data = json.loads(raw)
+    except Exception:
+        # Try form-urlencoded parse manually
         try:
-            data = json.loads(raw)
-            html_body = data.get('html_body', '')
-            sender_email = data.get('sender', '')
-            entry_date = data.get('date', '')
+            from urllib.parse import parse_qs
+            parsed = parse_qs(raw)
+            data = {k: v[0] for k, v in parsed.items()}
         except Exception:
-            pass
+            return jsonify({
+                'success': False,
+                'error': 'Could not parse request body',
+                'records': []
+            }), 400
+
+    html_body = data.get('html_body', '')
+    sender_email = data.get('sender', '')
+    entry_date = data.get('date', '')
 
     if not html_body:
         return jsonify({
@@ -229,6 +236,7 @@ def parse_email():
             'success': False,
             'message': 'No disbursement table found',
             'html_length': len(html_body),
+            'table_count': len(BeautifulSoup(html_body, 'html.parser').find_all('table')),
             'records': []
         })
 
@@ -249,5 +257,7 @@ def home():
     return jsonify({'status': 'running', 'service': 'Fineoteric Email Parser'})
 
 
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000, debug=True)
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000, debug=True)
