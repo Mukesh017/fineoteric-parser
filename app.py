@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
 import re
+import json
 
 app = Flask(__name__)
 
@@ -89,7 +90,7 @@ FIELD_MAP = {
     "sanction date":                        "N/A",
     "payout":                               "Payout %",
     "status":                               "STATUS",
-    "status of application":                "STATUS",
+    "status of application":               "STATUS",
     "finnone stage":                        "STATUS",
     "tenure":                               "N/A",
     "loan tenure approved":                 "N/A",
@@ -198,16 +199,22 @@ def parse_email_html(html_body, sender_email="", entry_date=""):
 
 @app.route('/parse-email', methods=['POST'])
 def parse_email():
-    # Try form-data first, then JSON
-    html_body = request.form.get('html_body', '')
-    sender_email = request.form.get('sender', '')
-    entry_date = request.form.get('date', '')
+    # Read raw bytes and decode — works regardless of Content-Type header
+    raw = request.get_data(as_text=True)
 
-    if not html_body:
-        data = request.get_json(force=True, silent=True) or {}
-        html_body = data.get('html_body', '')
-        sender_email = data.get('sender', '')
-        entry_date = data.get('date', '')
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return jsonify({
+            'success': False,
+            'error': 'Could not parse request body as JSON',
+            'received_preview': raw[:200],
+            'records': []
+        }), 400
+
+    html_body = data.get('html_body', '')
+    sender_email = data.get('sender', '')
+    entry_date = data.get('date', '')
 
     if not html_body:
         return jsonify({
@@ -222,6 +229,8 @@ def parse_email():
         return jsonify({
             'success': False,
             'message': 'No disbursement table found in this email',
+            'html_length': len(html_body),
+            'table_count': len(BeautifulSoup(html_body, 'html.parser').find_all('table')),
             'records': []
         })
 
@@ -244,4 +253,3 @@ def home():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000, debug=True)
-    app.run(host='0.0.0.0', port=5000, debug=True)
