@@ -221,13 +221,12 @@ class MLClassifier:
                        "nbfc", "finance", "credit", "status", "update"],
             "low": ["newsletter", "promotion", "offer", "marketing", "spam"]
         }
-        self.blocked_domains = ["gmail.com", "yahoo.com", "hotmail.com",
-                                "outlook.com", "rediffmail.com"]
+        # NO BLOCKED DOMAINS — personal emails (Gmail, Yahoo, etc.) allowed
+        # RM can send from personal IDs
 
     def classify(self, subject: str, sender: str, body_text: str, body_html: str = "") -> Dict:
         if self.mode == "rules":
             return self._rule_based(subject, sender, body_text, body_html)
-        # Future: sklearn / huggingface — one-line swap
         return self._rule_based(subject, sender, body_text, body_html)
 
     def _rule_based(self, subject, sender, body_text, body_html):
@@ -237,8 +236,9 @@ class MLClassifier:
         domain_score = 0.0
         if any(td in domain for td in self.trusted_domains):
             domain_score = 0.30
-        elif any(d in domain for d in self.blocked_domains):
-            domain_score = -0.30
+        else:
+            # Personal/unknown domain — not blocked, just lower confidence
+            domain_score = 0.10
 
         keyword_score = 0.0
         for kw in self.keywords["high"]:
@@ -254,16 +254,15 @@ class MLClassifier:
 
         subject_score = 0.10 if any(k in subject.lower() for k in self.keywords["high"]) else 0.0
         density_score = 0.05 if "disbursement" in text or "disbursed" in text else 0.0
-        blocked_penalty = -0.20 if any(d in domain for d in self.blocked_domains) else 0.0
 
-        total = domain_score + keyword_score + subject_score + density_score + blocked_penalty
+        total = domain_score + keyword_score + subject_score + density_score
         total = max(0.0, min(1.0, total))
-        is_relevant = total >= 0.40 and domain_score > 0
+        is_relevant = total >= 0.40
 
         if is_relevant:
-            reason = "trusted_domain_with_keywords" if keyword_score > 0 else "trusted_domain"
+            reason = "trusted_domain_with_keywords" if domain_score >= 0.30 else "keywords_match"
         else:
-            reason = "blocked_domain" if blocked_penalty < 0 else "low_confidence"
+            reason = "low_confidence"
 
         return {
             "is_relevant": is_relevant,
@@ -274,7 +273,6 @@ class MLClassifier:
                 "keyword_score": round(keyword_score, 2),
                 "subject_score": round(subject_score, 2),
                 "density_score": round(density_score, 2),
-                "blocked_penalty": round(blocked_penalty, 2),
                 "total": round(total, 2)
             }
         }
@@ -286,6 +284,7 @@ def parse_email_html(html_body: str, plain_text: str = "") -> List[Dict]:
     if not html_body and not plain_text:
         return records
 
+    # If html_body is empty but plain_text has data, use plain_text
     soup = BeautifulSoup(html_body or plain_text, "html.parser")
     for tag in soup(["script", "style"]):
         tag.decompose()
@@ -343,7 +342,6 @@ def _parse_format_3(soup, text, lines):
         if not headers:
             continue
 
-        # Detect customer columns
         cust_cols = []
         for idx, h in enumerate(headers):
             if any(k in h for k in ["customer", "applicant", "name", "lan", "application"]):
@@ -449,9 +447,6 @@ def standardize_record(record: Dict) -> Dict:
     for key in std:
         val = record.get(key)
         std[key] = val if val not in [None, "", " "] else "N/A"
-
-    # Mandatory fields — keep raw (validation will catch if empty)
-    # Do NOT force N/A on APPLICATION NUMBER / CUSTOMER NAME
 
     # Amounts
     std["TOTAL DISB AMOUNT"] = _std_amount(std["TOTAL DISB AMOUNT"])
@@ -609,7 +604,7 @@ def upsert_records(records: List[Dict]) -> Dict:
     return results
 
 # ============== FASTAPI APP ==============
-app = FastAPI(title="Fineoteric Email Processor", version="3.0.0")
+app = FastAPI(title="Fineoteric Email Processor", version="3.1.0")
 
 @app.on_event("startup")
 def startup():
@@ -643,11 +638,11 @@ class UpsertRequest(BaseModel):
 
 @app.get("/")
 def root():
-    return {"message": "Fineoteric Email Processor API", "version": "3.0.0", "docs": "/docs"}
+    return {"message": "Fineoteric Email Processor API", "version": "3.1.0", "docs": "/docs"}
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.0.0", "ml_mode": ML_MODE, "db_path": DB_PATH, "timestamp": datetime.now().isoformat()}
+    return {"status": "healthy", "version": "3.1.0", "ml_mode": ML_MODE, "db_path": DB_PATH, "timestamp": datetime.now().isoformat()}
 
 @app.get("/config")
 def config():
@@ -691,15 +686,9 @@ def process_email(req: ProcessRequest):
                 "records": []}
 
     domain = req.sender.split("@")[-1].lower() if "@" in req.sender else ""
-    trusted = any(td in domain for td in classifier.trusted_domains)
-    blocked = any(d in domain for d in classifier.blocked_domains)
-    sender_valid = trusted and not blocked
-
-    if not sender_valid:
-        return {"success": True, "action": "rejected", "reason": "invalid_sender",
-                "pipeline": {"classification": classification, "sender_validation": {"is_valid": False, "domain": domain},
-                             "extraction": None, "validation": None, "upsert": None},
-                "records": []}
+    # NO DOMAIN BLOCKING — personal emails (Gmail, Yahoo, etc.) allowed
+    # RM can send from personal IDs
+    sender_valid = True  # Everyone allowed, just log the domain
 
     records = parse_email_html(req.html_body, req.plain_text)
     valid_records, invalid_records = [], []
@@ -734,7 +723,7 @@ def process_email(req: ProcessRequest):
     msg = f"Processed {len(records)}: {upsert_results['inserted'] if upsert_results else 0} inserted, {upsert_results['updated'] if upsert_results else 0} updated, {upsert_results['skipped'] if upsert_results else 0} skipped, {len(invalid_records)} queued" if upsert_results else f"Processed {len(records)}: 0 inserted, 0 updated, 0 skipped, {len(invalid_records)} queued"
     return {"success": True, "action": "processed", "message": msg,
             "pipeline": {"classification": classification,
-                         "sender_validation": {"is_valid": True, "domain": domain},
+                         "sender_validation": {"is_valid": True, "domain": domain, "note": "All domains allowed"},
                          "extraction": {"record_count": len(records)},
                          "validation": {"valid": len(valid_records), "invalid": len(invalid_records)},
                          "upsert": upsert_results},
