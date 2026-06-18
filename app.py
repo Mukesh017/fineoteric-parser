@@ -15,7 +15,7 @@ DB_PATH = os.environ.get("DB_PATH", "fineoteric.db")
 MODEL_PATH = os.environ.get("MODEL_PATH", "email_classifier.pkl")
 ML_MODE = os.environ.get("ML_MODE", "rules")
 
-# ============== 39 FIELDS — EXACT SHEET MATCH ==============
+# ============== 39 FIELDS - EXACT SHEET MATCH ==============
 STANDARD_ROW = {
     "SR NO": "N/A", "MIS UNIQUE ID": "N/A", "ENTRY DATE": "N/A",
     "ENTRY DONE BY": "AUTO", "CASE NO": "N/A", "ENQUIRY NO": "N/A",
@@ -146,189 +146,317 @@ class MLClassifier:
             }
         }
 
-# ============== EMAIL PARSER ==============
+# ============== EMAIL PARSER - ALL FORMATS ==============
 def parse_email_html(html_body, plain_text=""):
+    """Parse email body and extract loan records. Handles HTML tables, tab-separated, and space-separated formats."""
     records = []
     if not html_body and not plain_text:
         return records
-    soup = BeautifulSoup(html_body or plain_text, "html.parser")
-    for tag in soup(["script", "style"]):
-        tag.decompose()
-    text = soup.get_text(separator="\n")
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    records = _parse_format_3(soup, text, lines)
-    if not records:
-        records = _parse_format_2(soup, text, lines)
-    if not records:
-        records = _parse_format_1(soup, text, lines)
-    if not records and plain_text:
-        records = _parse_plain_text(plain_text)
-    if not records and text:
-        records = _parse_plain_text(text)
-    return [standardize_record(r) for r in records]
 
-def _parse_format_1(soup, text, lines):
-    records = []
-    record = dict(STANDARD_ROW)
-    for line in lines:
-        if ":" not in line: continue
-        key, val = line.split(":", 1)
-        _map_cell_to_field(record, key.strip(), val.strip())
-    if record["CUSTOMER NAME"] or record["APPLICATION NUMBER"]:
-        records.append(record)
-    return records if records else None
+    # Try HTML parsing first
+    if html_body:
+        soup = BeautifulSoup(html_body, "html.parser")
+        for tag in soup(["script", "style"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n")
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
 
-def _parse_format_2(soup, text, lines):
-    records = []
-    record = dict(STANDARD_ROW)
-    for line in lines:
-        if ":" not in line: continue
-        key, val = line.split(":", 1)
-        _map_cell_to_field(record, key.strip(), val.strip())
-    if record["CUSTOMER NAME"] or record["APPLICATION NUMBER"]:
-        records.append(record)
-    return records if records else None
+        # Try HTML table format (multi-column)
+        records = _parse_html_table(soup)
+        if records:
+            return [standardize_record(r) for r in records]
 
-def _parse_format_3(soup, text, lines):
+        # Try tab-separated from HTML text
+        records = _parse_tab_separated(text)
+        if records:
+            return [standardize_record(r) for r in records]
+
+    # Try plain text
+    if plain_text:
+        # Try tab-separated
+        records = _parse_tab_separated(plain_text)
+        if records:
+            return [standardize_record(r) for r in records]
+
+        # Try space-separated
+        records = _parse_space_separated(plain_text)
+        if records:
+            return [standardize_record(r) for r in records]
+
+        # Try colon-separated
+        records = _parse_colon_separated(plain_text)
+        if records:
+            return [standardize_record(r) for r in records]
+
+    return records
+
+
+def _parse_html_table(soup):
+    """Parse HTML <table> with multiple columns (1 customer per column after Description)."""
     records = []
     tables = soup.find_all("table")
+
     for table in tables:
         rows = table.find_all("tr")
-        if len(rows) < 2: continue
-        headers = [th.get_text(strip=True).lower() for th in rows[0].find_all(["th", "td"])]
-        if not headers: continue
-        cust_cols = []
-        for idx, h in enumerate(headers):
-            if any(k in h for k in ["customer", "applicant", "name", "lan", "application"]):
-                cust_cols.append(idx)
-        if len(cust_cols) >= 2:
-            for col_idx in cust_cols:
-                record = dict(STANDARD_ROW)
-                for row in rows[1:]:
-                    cells = row.find_all(["td", "th"])
-                    if col_idx < len(cells) and cells:
-                        row_header = cells[0].get_text(strip=True)
-                        cell_text = cells[col_idx].get_text(strip=True)
-                        _map_cell_to_field(record, row_header, cell_text)
-                if record["CUSTOMER NAME"] or record["APPLICATION NUMBER"]:
-                    records.append(record)
+        if len(rows) < 2:
+            continue
+
+        # Get all rows as list of cell texts
+        table_data = []
+        for row in rows:
+            cells = row.find_all(["td", "th"])
+            cell_texts = [c.get_text(strip=True) for c in cells]
+            if cell_texts:
+                table_data.append(cell_texts)
+
+        if not table_data:
+            continue
+
+        # Check if first row has "Descriptions" or similar
+        first_row = [c.lower() for c in table_data[0]]
+        if not any("description" in c for c in first_row):
+            continue
+
+        # Number of customer columns = total columns - 1 (description column)
+        num_customers = len(table_data[0]) - 1
+        if num_customers < 1:
+            continue
+
+        # Extract data for each customer column
+        for cust_idx in range(1, num_customers + 1):
+            record = dict(STANDARD_ROW)
+            for row in table_data[1:]:
+                if len(row) > cust_idx:
+                    key = row[0]
+                    val = row[cust_idx]
+                    _map_cell_to_field(record, key, val)
+
+            if record["CUSTOMER NAME"] or record["APPLICATION NUMBER"]:
+                records.append(record)
+
     return records if records else None
 
-def _parse_plain_text(text):
-    """Parse plain text with space-separated labels (no colons)."""
+
+def _parse_tab_separated(text):
+    """Parse tab-separated format: Description\tValue or Description\tCust1\tCust2."""
+    records = []
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    if not lines:
+        return None
+
+    # Check if tabs exist
+    has_tabs = any("\t" in line for line in lines)
+    if not has_tabs:
+        return None
+
+    # Find header row
+    header_row = None
+    for i, line in enumerate(lines):
+        if "description" in line.lower():
+            header_row = i
+            break
+
+    if header_row is None:
+        # No header, assume first line is header or data starts directly
+        header_row = 0
+
+    # Count columns from header
+    header_parts = lines[header_row].split("\t")
+    num_cols = len(header_parts)
+
+    if num_cols == 2:
+        # Single customer: Description | Status
+        record = dict(STANDARD_ROW)
+        for line in lines[header_row + 1:]:
+            parts = line.split("\t", 1)
+            if len(parts) == 2:
+                key, val = parts[0].strip(), parts[1].strip()
+                _map_cell_to_field(record, key, val)
+                # Check if value looks like LAN
+                if val and (val.startswith("DRBL") or val.startswith("KH") or val.startswith("HL")):
+                    record["APPLICATION NUMBER"] = val
+
+        if record["CUSTOMER NAME"] or record["APPLICATION NUMBER"]:
+            records.append(record)
+
+    elif num_cols >= 3:
+        # Multiple customers: Description | Cust1 | Cust2 | ...
+        num_customers = num_cols - 1
+
+        for cust_idx in range(1, num_cols):
+            record = dict(STANDARD_ROW)
+            for line in lines[header_row + 1:]:
+                parts = line.split("\t")
+                if len(parts) > cust_idx:
+                    key = parts[0].strip()
+                    val = parts[cust_idx].strip()
+                    _map_cell_to_field(record, key, val)
+                    # Check if value looks like LAN
+                    if val and (val.startswith("DRBL") or val.startswith("KH") or val.startswith("HL")):
+                        record["APPLICATION NUMBER"] = val
+
+            if record["CUSTOMER NAME"] or record["APPLICATION NUMBER"]:
+                records.append(record)
+
+    return records if records else None
+
+
+def _parse_space_separated(text):
+    """Parse space-separated format without tabs or colons."""
     records = []
     record = dict(STANDARD_ROW)
     text_clean = text.replace("\n", " ").replace("\r", " ").strip()
-    
+
     # Extract Customer Name / Company Name
-    cust_match = re.search(r'Customer\s*name[/\\]?\s*Company\s*Name\s+([^-]+?)(?:\s*[-\u2013]\s*NBFC|Bank|$)', text_clean, re.IGNORECASE)
-    if cust_match:
-        record["CUSTOMER NAME"] = cust_match.group(1).strip()
-    
+    cust_patterns = [
+        r'Customer\s*name[/\\]?\s*Company\s*Name\s+(.+?)(?:\s+NBFC|Bank|Product|$)',
+        r'Customer\s*name[/\\]?\s*Company\s*Name\s+(.+?)(?:\s*-\s*NBFC|Bank|Product|$)',
+    ]
+    for pat in cust_patterns:
+        m = re.search(pat, text_clean, re.IGNORECASE)
+        if m:
+            record["CUSTOMER NAME"] = m.group(1).strip()
+            break
+
     # Extract Bank Name
     bank_match = re.search(r'NBFC[/\\]?Bank\s*Name\s+(.+?)(?:\s+Product|$)', text_clean, re.IGNORECASE)
     if bank_match:
         record["BANK NAME"] = bank_match.group(1).strip()
-    
+
     # Extract Product
     prod_match = re.search(r'Product\s+(.+?)(?:\s+DSA\s*Name|$)', text_clean, re.IGNORECASE)
     if prod_match:
         record["PRODUCT"] = prod_match.group(1).strip()
-    
+
     # Extract DSA Name / Connector
     dsa_match = re.search(r'DSA\s*Name\s+(.+?)(?:\s+DSA\s*code|$)', text_clean, re.IGNORECASE)
     if dsa_match:
         record["CONNECTOR"] = dsa_match.group(1).strip()
-    
+
     # Extract DSA Code
     code_match = re.search(r'DSA\s*code\s+(\S+)', text_clean, re.IGNORECASE)
     if code_match:
         record["CODE"] = code_match.group(1).strip()
-    
+
     # Extract Amount
     amt_match = re.search(r'(?:Sanction|Disbursed|Amount)\s*Amount\s+([\d,./\-]+)', text_clean, re.IGNORECASE)
     if amt_match:
         record["TOTAL DISB AMOUNT"] = amt_match.group(1).strip()
-    
-    # Fallback: colon-separated format
+
+    # Extract Disbursed Date
+    disb_date_match = re.search(r'Disbursed\s*Date\s+([\d\-A-Za-z/]+)', text_clean, re.IGNORECASE)
+    if disb_date_match:
+        record["DISB DATE"] = disb_date_match.group(1).strip()
+
+    # Extract Payout
+    payout_match = re.search(r'Payout\s+(.+)', text_clean, re.IGNORECASE)
+    if payout_match:
+        record["CONNECTOR PAYOUT%"] = payout_match.group(1).strip()
+        record["OTHER PAYOUT %"] = payout_match.group(1).strip()
+
+    # Extract LAN Number
+    lan_match = re.search(r'LAN\s*Number\s+(\S+)', text_clean, re.IGNORECASE)
+    if lan_match:
+        record["APPLICATION NUMBER"] = lan_match.group(1).strip()
+
+    if record["CUSTOMER NAME"] or record["APPLICATION NUMBER"]:
+        records.append(record)
+
+    return records if records else None
+
+
+def _parse_colon_separated(text):
+    """Parse colon-separated format: Key: Value."""
+    records = []
+    record = dict(STANDARD_ROW)
     lines = [l.strip() for l in text.split("\n") if l.strip()]
+
     for line in lines:
         if ":" in line:
             key, val = line.split(":", 1)
             _map_cell_to_field(record, key.strip(), val.strip())
-    
+
     if record["CUSTOMER NAME"] or record["APPLICATION NUMBER"]:
         records.append(record)
-    return records if records else []
+
+    return records if records else None
+
 
 def _map_cell_to_field(record, header_text, cell_text):
+    """Map a cell header and value to the correct field in the record."""
     h = header_text.lower()
+    val = cell_text.strip()
+
+    if not val or val == "N/A":
+        return
+
     if "customer" in h and "name" in h:
-        record["CUSTOMER NAME"] = cell_text
+        record["CUSTOMER NAME"] = val
     elif "application" in h and any(x in h for x in ["id", "number", "no", "lan"]):
-        record["APPLICATION NUMBER"] = cell_text
+        record["APPLICATION NUMBER"] = val
     elif "company" in h and "name" in h:
-        record["COMPANY NAME"] = cell_text
+        record["COMPANY NAME"] = val
     elif "bank" in h and "name" in h:
-        record["BANK NAME"] = cell_text
+        record["BANK NAME"] = val
     elif "code" in h and "dsa" in h:
-        record["CODE"] = cell_text
+        record["CODE"] = val
     elif "branch" in h:
-        record["BRANCH"] = cell_text
+        record["BRANCH"] = val
     elif "rm" in h and "name" in h:
-        record["RM NAME"] = cell_text
+        record["RM NAME"] = val
     elif "product" in h:
-        record["PRODUCT"] = cell_text
+        record["PRODUCT"] = val
     elif "connector" in h and "2" not in h and "payout" not in h:
-        record["CONNECTOR"] = cell_text
+        record["CONNECTOR"] = val
     elif "unit head" in h and "payout" not in h and "%" not in h and "amt" not in h:
-        record["UNIT HEAD"] = cell_text
+        record["UNIT HEAD"] = val
     elif "sm" in h and "name" in h:
-        record["SM NAME"] = cell_text
+        record["SM NAME"] = val
     elif "executive" in h:
-        record["EXECUTIVE"] = cell_text
+        record["EXECUTIVE"] = val
     elif "region" in h:
-        record["REGION"] = cell_text
+        record["REGION"] = val
     elif "status" in h and "bill" not in h:
-        record["STATUS"] = cell_text
+        record["STATUS"] = val
     elif "disburs" in h and "amount" in h:
-        record["TOTAL DISB AMOUNT"] = cell_text
+        record["TOTAL DISB AMOUNT"] = val
     elif "disburs" in h and "date" in h:
-        record["DISB DATE"] = cell_text
+        record["DISB DATE"] = val
     elif "spill" in h or "fresh" in h:
-        record["SPILL - FRESH"] = cell_text
+        record["SPILL - FRESH"] = val
     elif "profile" in h:
-        record["PROFILE"] = cell_text
+        record["PROFILE"] = val
     elif "bank payout" in h and "%" in h:
-        record["BANK PAYOUT%"] = cell_text
+        record["BANK PAYOUT%"] = val
     elif "bank payout" in h and ("amt" in h or "amount" in h):
-        record["BANK PAYOUTAMT"] = cell_text
+        record["BANK PAYOUTAMT"] = val
     elif "connector payout" in h and "2" not in h and "%" in h:
-        record["CONNECTOR PAYOUT%"] = cell_text
-        record["OTHER PAYOUT %"] = cell_text
+        record["CONNECTOR PAYOUT%"] = val
+        record["OTHER PAYOUT %"] = val
     elif "connector payout" in h and "2" not in h and ("amt" in h or "amount" in h):
-        record["CONNECTOR PAYOUT AMT"] = cell_text
+        record["CONNECTOR PAYOUT AMT"] = val
     elif "connector 2 payout" in h and "%" in h:
-        record["CONNECTOR 2 PAYOUT%"] = cell_text
+        record["CONNECTOR 2 PAYOUT%"] = val
     elif "connector 2 payout" in h and ("amt" in h or "amount" in h):
-        record["CONNECTOR 2 PAYOUT AMT"] = cell_text
+        record["CONNECTOR 2 PAYOUT AMT"] = val
     elif "unit head payout" in h and "%" in h:
-        record["UNIT HEAD%"] = cell_text
+        record["UNIT HEAD%"] = val
     elif "unit head payout" in h and ("amt" in h or "amount" in h):
-        record["UNIT HEAD AMT"] = cell_text
+        record["UNIT HEAD AMT"] = val
     elif "sm payout" in h and "%" in h:
-        record["SM PAYOUT%"] = cell_text
+        record["SM PAYOUT%"] = val
     elif "sm payout" in h and ("amt" in h or "amount" in h):
-        record["SM PAYOUT AMT"] = cell_text
+        record["SM PAYOUT AMT"] = val
     elif "se payout" in h and "%" in h:
-        record["SE PAYOUT%"] = cell_text
+        record["SE PAYOUT%"] = val
     elif "se payout" in h and ("amt" in h or "amount" in h):
-        record["SE PAYOUT AMT"] = cell_text
+        record["SE PAYOUT AMT"] = val
     elif "other payout" in h and "%" in h:
-        record["OTHER PAYOUT %"] = cell_text
+        record["OTHER PAYOUT %"] = val
     elif "payout" in h and "%" in h and "bank" not in h and "connector" not in h and "unit" not in h and "sm" not in h and "se" not in h:
-        record["CONNECTOR PAYOUT%"] = cell_text
-        record["OTHER PAYOUT %"] = cell_text
+        record["CONNECTOR PAYOUT%"] = val
+        record["OTHER PAYOUT %"] = val
+
 
 # ============== STANDARDIZATION ==============
 def standardize_record(record):
@@ -350,17 +478,23 @@ def standardize_record(record):
     std["BANK PAYOUT%"] = _std_payout(std["BANK PAYOUT%"])
     return std
 
+
 def _std_amount(val):
-    if not val or val == "N/A": return "N/A"
+    if not val or val == "N/A":
+        return "N/A"
     v = str(val).strip()
-    if "as per" in v.lower(): return v
-    if "+gst" in v.lower(): return v
-    v = re.sub(r'[₹Rs,\s/]', '', v, flags=re.IGNORECASE)
+    if "as per" in v.lower():
+        return v
+    if "+gst" in v.lower():
+        return v
+    v = re.sub(r'[Rs,\s/]', '', v, flags=re.IGNORECASE)
     nums = re.findall(r'\d+\.?\d*', v)
     return nums[0] if nums else (v if v else "N/A")
 
+
 def _std_date(val):
-    if not val or val == "N/A": return "N/A"
+    if not val or val == "N/A":
+        return "N/A"
     v = str(val).strip()
     patterns = [
         (r'(\d{1,2})[/-](\d{1,2})[/-](\d{4})', lambda m: f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"),
@@ -370,23 +504,33 @@ def _std_date(val):
     for pat, fmt in patterns:
         m = re.match(pat, v)
         if m:
-            try: return fmt(m)
-            except: pass
+            try:
+                return fmt(m)
+            except:
+                pass
     return v
 
+
 def _mon(s):
-    m = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,"jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12,
-         "january":1,"february":2,"march":3,"april":4,"may":5,"june":6,"july":7,"august":8,"september":9,"october":10,"november":11,"december":12}
+    m = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+         "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+         "january": 1, "february": 2, "march": 3, "april": 4, "may": 5,
+         "june": 6, "july": 7, "august": 8, "september": 9, "october": 10,
+         "november": 11, "december": 12}
     return f"{m.get(s.lower(), 1):02d}"
 
+
 def _std_payout(val):
-    if not val or val == "N/A": return "N/A"
+    if not val or val == "N/A":
+        return "N/A"
     v = str(val).strip()
-    if "as per" in v.lower(): return v
+    if "as per" in v.lower():
+        return v
     if "%" in v:
         nums = re.findall(r'\d+\.?\d*', v)
         return nums[0] if nums else v
     return v
+
 
 # ============== VALIDATION ==============
 def validate_record(record):
@@ -399,17 +543,20 @@ def validate_record(record):
         errors.append("CUSTOMER NAME is required")
     return {"is_valid": len(errors) == 0, "errors": errors}
 
+
 # ============== UPSERT ==============
 def _record_hash(record):
     keys = ["APPLICATION NUMBER", "CUSTOMER NAME", "BANK NAME",
             "TOTAL DISB AMOUNT", "DISB DATE", "STATUS", "PRODUCT"]
     return hashlib.md5("|".join([str(record.get(k, "")) for k in keys]).encode()).hexdigest()
 
+
 def upsert_records(records):
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     results = {"inserted": 0, "updated": 0, "skipped": 0, "failed": 0, "details": []}
+
     for rec in records:
         try:
             app_no = rec.get("APPLICATION NUMBER")
@@ -417,9 +564,11 @@ def upsert_records(records):
                 results["failed"] += 1
                 results["details"].append({"action": "failed", "reason": "No APPLICATION NUMBER", "application_number": app_no})
                 continue
+
             c.execute("SELECT * FROM loan_records WHERE application_number = ?", (app_no,))
             existing = c.fetchone()
             new_hash = _record_hash(rec)
+
             if existing:
                 ex = dict(existing)
                 if new_hash == ex.get("record_hash"):
@@ -430,7 +579,8 @@ def upsert_records(records):
                     params = []
                     for key in STANDARD_ROW.keys():
                         dbk = DB_COL_MAP[key]
-                        if dbk not in ex: continue
+                        if dbk not in ex:
+                            continue
                         old_val = ex[dbk] or "N/A"
                         new_val = rec.get(key, "N/A")
                         if old_val == "N/A" and new_val not in ["N/A", ""]:
@@ -439,6 +589,7 @@ def upsert_records(records):
                         elif key in ["TOTAL DISB AMOUNT", "DISB DATE", "STATUS"] and old_val != new_val and new_val not in ["N/A", ""]:
                             updates.append(f"{dbk} = ?")
                             params.append(new_val)
+
                     if updates:
                         hist = json.loads(ex.get("history", "[]"))
                         hist.append({"timestamp": datetime.now().isoformat(), "changes": updates})
@@ -448,7 +599,7 @@ def upsert_records(records):
                         params.append(app_no)
                         c.execute(sql, params)
                         results["updated"] += 1
-                        results["details"].append({"action": "updated", "application_number": app_no, "fields_changed": len(updates)-3})
+                        results["details"].append({"action": "updated", "application_number": app_no, "fields_changed": len(updates) - 3})
                     else:
                         results["skipped"] += 1
                         results["details"].append({"action": "skipped", "reason": "No meaningful change", "application_number": app_no})
@@ -463,19 +614,23 @@ def upsert_records(records):
                 c.execute(sql, values)
                 results["inserted"] += 1
                 results["details"].append({"action": "inserted", "application_number": app_no})
+
             conn.commit()
         except Exception as e:
             results["failed"] += 1
             results["details"].append({"action": "failed", "reason": str(e), "application_number": rec.get("APPLICATION NUMBER", "")})
+
     conn.close()
     return results
 
+
 # ============== FASTAPI APP ==============
-app = FastAPI(title="Fineoteric Email Processor", version="3.2.0")
+app = FastAPI(title="Fineoteric Email Processor", version="4.0.0")
 
 @app.on_event("startup")
 def startup():
     init_db()
+
 
 class ProcessRequest(BaseModel):
     html_body: str = ""
@@ -484,34 +639,42 @@ class ProcessRequest(BaseModel):
     sender: str = ""
     date: str = ""
 
+
 class ClassifyRequest(BaseModel):
     subject: str = ""
     sender: str = ""
     body_text: str = ""
     body_html: str = ""
 
+
 class MarkReadRequest(BaseModel):
     message_id: str = ""
     thread_id: str = ""
 
+
 class ValidateRequest(BaseModel):
     records: List[Dict]
+
 
 class UpsertRequest(BaseModel):
     records: List[Dict]
 
+
 @app.get("/")
 def root():
-    return {"message": "Fineoteric Email Processor API", "version": "3.2.0", "docs": "/docs"}
+    return {"message": "Fineoteric Email Processor API", "version": "4.0.0", "docs": "/docs"}
+
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.2.0", "ml_mode": ML_MODE, "db_path": DB_PATH, "timestamp": datetime.now().isoformat()}
+    return {"status": "healthy", "version": "4.0.0", "ml_mode": ML_MODE, "db_path": DB_PATH, "timestamp": datetime.now().isoformat()}
+
 
 @app.get("/config")
 def config():
     return {"ml_mode": ML_MODE, "db_path": DB_PATH, "model_path": MODEL_PATH, "total_fields": 39,
             "mandatory_fields": ["APPLICATION NUMBER", "CUSTOMER NAME"], "fallback_value": "N/A"}
+
 
 @app.post("/classify")
 def classify_email(req: ClassifyRequest):
@@ -519,10 +682,12 @@ def classify_email(req: ClassifyRequest):
     result = classifier.classify(req.subject, req.sender, req.body_text, req.body_html)
     return {"success": True, "classification": result}
 
+
 @app.post("/extract")
 def extract_email(req: ProcessRequest):
     records = parse_email_html(req.html_body, req.plain_text)
     return {"success": True, "record_count": len(records), "records": records}
+
 
 @app.post("/validate")
 def validate_records(req: ValidateRequest):
@@ -533,30 +698,38 @@ def validate_records(req: ValidateRequest):
     all_valid = all(v["validation"]["is_valid"] for v in validated)
     return {"success": True, "all_valid": all_valid, "results": validated}
 
+
 @app.post("/upsert")
 def upsert_endpoint(req: UpsertRequest):
     results = upsert_records(req.records)
     return {"success": True, "upsert": results}
 
+
 @app.post("/process")
 def process_email(req: ProcessRequest):
     classifier = MLClassifier()
     classification = classifier.classify(req.subject, req.sender, req.plain_text, req.html_body)
+
     if not classification["is_relevant"]:
         return {"success": True, "action": "skipped", "reason": classification["reason"],
                 "pipeline": {"classification": classification, "sender_validation": None, "extraction": None, "validation": None, "upsert": None},
                 "records": []}
+
     domain = req.sender.split("@")[-1].lower() if "@" in req.sender else ""
     sender_valid = True
+
     records = parse_email_html(req.html_body, req.plain_text)
     valid_records, invalid_records = [], []
+
     for rec in records:
         v = validate_record(rec)
         if v["is_valid"]:
             valid_records.append(rec)
         else:
             invalid_records.append({"record": rec, "errors": v["errors"]})
+
     upsert_results = upsert_records(valid_records) if valid_records else None
+
     if invalid_records:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -565,6 +738,7 @@ def process_email(req: ProcessRequest):
                       ("", req.subject, req.sender, json.dumps(inv["errors"]), json.dumps(inv["record"])))
         conn.commit()
         conn.close()
+
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO email_log (email_id, subject, sender, action, details) VALUES (?, ?, ?, ?, ?)",
@@ -572,7 +746,9 @@ def process_email(req: ProcessRequest):
                "records_found": len(records), "valid": len(valid_records), "invalid": len(invalid_records)})))
     conn.commit()
     conn.close()
+
     msg = f"Processed {len(records)}: {upsert_results['inserted'] if upsert_results else 0} inserted, {upsert_results['updated'] if upsert_results else 0} updated, {upsert_results['skipped'] if upsert_results else 0} skipped, {len(invalid_records)} queued" if upsert_results else f"Processed {len(records)}: 0 inserted, 0 updated, 0 skipped, {len(invalid_records)} queued"
+
     return {"success": True, "action": "processed", "message": msg,
             "pipeline": {"classification": classification,
                          "sender_validation": {"is_valid": True, "domain": domain, "note": "All domains allowed"},
@@ -581,9 +757,11 @@ def process_email(req: ProcessRequest):
                          "upsert": upsert_results},
             "records": valid_records}
 
+
 @app.post("/mark-read")
 def mark_read(req: MarkReadRequest):
     return {"success": True, "action": "mark_read", "payload": {"message_id": req.message_id, "thread_id": req.thread_id, "mark_read": True}}
+
 
 @app.get("/check/{lan}")
 def check_lan(lan: str):
@@ -596,6 +774,7 @@ def check_lan(lan: str):
     if row:
         return {"found": True, "record": dict(row)}
     return {"found": False, "record": None}
+
 
 @app.get("/metrics")
 def metrics():
@@ -610,6 +789,7 @@ def metrics():
     conn.close()
     return {"total_records": total, "review_queue": review, "processed_emails": processed, "ml_mode": ML_MODE}
 
+
 @app.get("/review-queue")
 def review_queue():
     conn = sqlite3.connect(DB_PATH)
@@ -619,6 +799,7 @@ def review_queue():
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return {"success": True, "count": len(rows), "records": rows}
+
 
 @app.post("/parse-email")
 def parse_email_legacy(req: ProcessRequest):
