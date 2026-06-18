@@ -148,56 +148,101 @@ class MLClassifier:
 
 # ============== EMAIL PARSER - ALL FORMATS ==============
 def parse_email_html(html_body, plain_text=""):
-    """Parse email body and extract loan records. Handles HTML tables, tab-separated, and space-separated formats."""
+    """Parse email body and extract loan records."""
     records = []
-    if not html_body and not plain_text:
+
+    # PRIORITY 1: Try plain_text first (most reliable from n8n)
+    if plain_text and len(plain_text.strip()) > 10:
+        records = _parse_from_text(plain_text)
+        if records:
+            return [standardize_record(r) for r in records]
+
+    # PRIORITY 2: Try html_body only if it looks like real HTML
+    if html_body and len(html_body.strip()) > 10:
+        # Check if html_body is actually n8n schema/table format (not real HTML)
+        if _is_real_html(html_body):
+            records = _parse_from_html(html_body)
+            if records:
+                return [standardize_record(r) for r in records]
+
+    return records
+
+
+def _is_real_html(html_body):
+    """Check if the string is actual HTML email content, not n8n schema format."""
+    html_lower = html_body.lower().strip()
+
+    # If it starts with pipe characters or n8n schema markers, it's NOT real HTML
+    if html_lower.startswith("|") or "| name |" in html_lower or "| type |" in html_lower:
+        return False
+
+    # If it contains HTML tags, it's real HTML
+    if "<html" in html_lower or "<body" in html_lower or "<table" in html_lower or "<div" in html_lower:
+        return True
+
+    # If it contains < and > tags, it's probably HTML
+    if "<" in html_body and ">" in html_body:
+        return True
+
+    return False
+
+
+def _parse_from_text(text):
+    """Parse from plain text - tries all text-based parsers."""
+    records = []
+
+    # Try tab-separated
+    records = _parse_tab_separated(text)
+    if records:
         return records
 
-    # Try HTML parsing first
-    if html_body:
-        soup = BeautifulSoup(html_body, "html.parser")
-        for tag in soup(["script", "style"]):
-            tag.decompose()
-        text = soup.get_text(separator="\n")
-        lines = [l.strip() for l in text.split("\n") if l.strip()]
+    # Try space-separated with known labels (handles 2 customers)
+    records = _parse_space_separated_v2(text)
+    if records:
+        return records
 
-        # Try HTML table format (multi-column)
-        records = _parse_html_table(soup)
-        if records:
-            return [standardize_record(r) for r in records]
+    # Try old space-separated
+    records = _parse_space_separated(text)
+    if records:
+        return records
 
-        # Try tab-separated from HTML text
-        records = _parse_tab_separated(text)
-        if records:
-            return [standardize_record(r) for r in records]
+    # Try colon-separated
+    records = _parse_colon_separated(text)
+    if records:
+        return records
 
-    # Try plain text
-    if plain_text:
-        # Try tab-separated
-        records = _parse_tab_separated(plain_text)
-        if records:
-            return [standardize_record(r) for r in records]
+    return records
 
-        # Try space-separated with known labels (NEW - handles 2 customers)
-        records = _parse_space_separated_v2(plain_text)
-        if records:
-            return [standardize_record(r) for r in records]
 
-        # Try old space-separated
-        records = _parse_space_separated(plain_text)
-        if records:
-            return [standardize_record(r) for r in records]
+def _parse_from_html(html_body):
+    """Parse from actual HTML content."""
+    records = []
 
-        # Try colon-separated
-        records = _parse_colon_separated(plain_text)
-        if records:
-            return [standardize_record(r) for r in records]
+    soup = BeautifulSoup(html_body, "html.parser")
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+    text = soup.get_text(separator="\n")
+
+    # Try HTML table format
+    records = _parse_html_table(soup)
+    if records:
+        return records
+
+    # Try tab-separated from HTML text
+    records = _parse_tab_separated(text)
+    if records:
+        return records
+
+    # Try space-separated from HTML text
+    records = _parse_space_separated_v2(text)
+    if records:
+        return records
 
     return records
 
 
 def _parse_html_table(soup):
-    """Parse HTML <table> with multiple columns (1 customer per column after Description)."""
+    """Parse HTML <table> with multiple columns."""
     records = []
     tables = soup.find_all("table")
 
@@ -206,7 +251,6 @@ def _parse_html_table(soup):
         if len(rows) < 2:
             continue
 
-        # Get all rows as list of cell texts
         table_data = []
         for row in rows:
             cells = row.find_all(["td", "th"])
@@ -217,17 +261,14 @@ def _parse_html_table(soup):
         if not table_data:
             continue
 
-        # Check if first row has "Descriptions" or similar
         first_row = [c.lower() for c in table_data[0]]
         if not any("description" in c for c in first_row):
             continue
 
-        # Number of customer columns = total columns - 1 (description column)
         num_customers = len(table_data[0]) - 1
         if num_customers < 1:
             continue
 
-        # Extract data for each customer column
         for cust_idx in range(1, num_customers + 1):
             record = dict(STANDARD_ROW)
             for row in table_data[1:]:
@@ -243,18 +284,16 @@ def _parse_html_table(soup):
 
 
 def _parse_tab_separated(text):
-    """Parse tab-separated format: Description\tValue or Description\tCust1\tCust2."""
+    """Parse tab-separated format."""
     records = []
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     if not lines:
         return None
 
-    # Check if tabs exist
     has_tabs = any("\t" in line for line in lines)
     if not has_tabs:
         return None
 
-    # Find header row
     header_row = None
     for i, line in enumerate(lines):
         if "description" in line.lower():
@@ -264,12 +303,10 @@ def _parse_tab_separated(text):
     if header_row is None:
         header_row = 0
 
-    # Count columns from header
     header_parts = lines[header_row].split("\t")
     num_cols = len(header_parts)
 
     if num_cols == 2:
-        # Single customer: Description | Status
         record = dict(STANDARD_ROW)
         for line in lines[header_row + 1:]:
             parts = line.split("\t", 1)
@@ -283,7 +320,6 @@ def _parse_tab_separated(text):
             records.append(record)
 
     elif num_cols >= 3:
-        # Multiple customers: Description | Cust1 | Cust2 | ...
         num_customers = num_cols - 1
 
         for cust_idx in range(1, num_cols):
@@ -304,18 +340,10 @@ def _parse_tab_separated(text):
 
 
 def _parse_space_separated_v2(text):
-    """Parse space-separated text with known labels and multiple customers.
-
-    Handles format like:
-    Descriptions Status Status
-    Customer name/ Company Name KANHAIYALAL SHANKARLAL JAIN RAHUL KANHAIYLAL JAIN
-    NBFC/Bank Name Kotak Mahindra Bank Ltd Kotak Mahindra Bank Ltd
-    ...
-    """
+    """Parse space-separated text with known labels and multiple customers."""
     records = []
     text_clean = text.replace("\r", " ").strip()
 
-    # Known labels in order of appearance
     KNOWN_LABELS = [
         ("Customer name/ Company Name", ["customer", "name", "company"]),
         ("NBFC/Bank Name", ["nbfc", "bank", "name"]),
@@ -336,24 +364,19 @@ def _parse_space_separated_v2(text):
         ("Payout", ["payout"]),
     ]
 
-    # Find all label positions in text
     label_positions = []
     for label, _ in KNOWN_LABELS:
-        # Try exact match first, then fuzzy
         idx = text_clean.find(label)
         if idx == -1:
-            # Try lowercase
             idx = text_clean.lower().find(label.lower())
         if idx != -1:
             label_positions.append((idx, label))
 
     if len(label_positions) < 3:
-        return None  # Not enough labels found
+        return None
 
-    # Sort by position
     label_positions.sort()
 
-    # Extract values between labels
     extracted = {}
     for i, (pos, label) in enumerate(label_positions):
         start = pos + len(label)
@@ -364,16 +387,11 @@ def _parse_space_separated_v2(text):
         value_text = text_clean[start:end].strip()
         extracted[label] = value_text
 
-    # Determine number of customers by checking duplicate values
-    # If values are repeated (like "Kotak Mahindra Bank Ltd Kotak Mahindra Bank Ltd"), 
-    # we have 2 customers
     num_customers = 1
     for label, val in extracted.items():
         if label in ["Product", "DSA code", "DSA Name"]:
-            # Check if value contains duplicates
             words = val.split()
             if len(words) >= 2:
-                # Simple heuristic: if first half == second half when split by middle
                 mid = len(words) // 2
                 first_half = " ".join(words[:mid])
                 second_half = " ".join(words[mid:])
@@ -381,7 +399,6 @@ def _parse_space_separated_v2(text):
                     num_customers = 2
                     break
 
-    # Build records for each customer
     for cust_idx in range(num_customers):
         record = dict(STANDARD_ROW)
 
@@ -389,7 +406,6 @@ def _parse_space_separated_v2(text):
             words = val.split()
 
             if num_customers == 2 and len(words) >= 2:
-                # Split value for 2 customers
                 mid = len(words) // 2
                 if cust_idx == 0:
                     cust_val = " ".join(words[:mid])
@@ -400,7 +416,6 @@ def _parse_space_separated_v2(text):
 
             _map_cell_to_field(record, label, cust_val)
 
-            # Special: LAN Number = APPLICATION NUMBER
             if "lan" in label.lower() and "number" in label.lower():
                 record["APPLICATION NUMBER"] = cust_val
 
@@ -416,7 +431,6 @@ def _parse_space_separated(text):
     record = dict(STANDARD_ROW)
     text_clean = text.replace("\n", " ").replace("\r", " ").strip()
 
-    # Extract Customer Name / Company Name
     cust_patterns = [
         r'Customer\s*name[/\\]?\s*Company\s*Name\s+(.+?)(?:\s+NBFC|Bank|Product|$)',
         r'Customer\s*name[/\\]?\s*Company\s*Name\s+(.+?)(?:\s*-\s*NBFC|Bank|Product|$)',
@@ -427,43 +441,35 @@ def _parse_space_separated(text):
             record["CUSTOMER NAME"] = m.group(1).strip()
             break
 
-    # Extract Bank Name
     bank_match = re.search(r'NBFC[/\\]?Bank\s*Name\s+(.+?)(?:\s+Product|$)', text_clean, re.IGNORECASE)
     if bank_match:
         record["BANK NAME"] = bank_match.group(1).strip()
 
-    # Extract Product
     prod_match = re.search(r'Product\s+(.+?)(?:\s+DSA\s*Name|$)', text_clean, re.IGNORECASE)
     if prod_match:
         record["PRODUCT"] = prod_match.group(1).strip()
 
-    # Extract DSA Name / Connector
     dsa_match = re.search(r'DSA\s*Name\s+(.+?)(?:\s+DSA\s*code|$)', text_clean, re.IGNORECASE)
     if dsa_match:
         record["CONNECTOR"] = dsa_match.group(1).strip()
 
-    # Extract DSA Code
     code_match = re.search(r'DSA\s*code\s+(\S+)', text_clean, re.IGNORECASE)
     if code_match:
         record["CODE"] = code_match.group(1).strip()
 
-    # Extract Amount
     amt_match = re.search(r'(?:Sanction|Disbursed|Amount)\s*Amount\s+([\d,./\-]+)', text_clean, re.IGNORECASE)
     if amt_match:
         record["TOTAL DISB AMOUNT"] = amt_match.group(1).strip()
 
-    # Extract Disbursed Date
     disb_date_match = re.search(r'Disbursed\s*Date\s+([\d\-A-Za-z/]+)', text_clean, re.IGNORECASE)
     if disb_date_match:
         record["DISB DATE"] = disb_date_match.group(1).strip()
 
-    # Extract Payout
     payout_match = re.search(r'Payout\s+(.+)', text_clean, re.IGNORECASE)
     if payout_match:
         record["CONNECTOR PAYOUT%"] = payout_match.group(1).strip()
         record["OTHER PAYOUT %"] = payout_match.group(1).strip()
 
-    # Extract LAN Number
     lan_match = re.search(r'LAN\s*Number\s+(\S+)', text_clean, re.IGNORECASE)
     if lan_match:
         record["APPLICATION NUMBER"] = lan_match.group(1).strip()
@@ -734,7 +740,7 @@ def upsert_records(records):
 
 
 # ============== FASTAPI APP ==============
-app = FastAPI(title="Fineoteric Email Processor", version="4.1.0")
+app = FastAPI(title="Fineoteric Email Processor", version="4.2.0")
 
 @app.on_event("startup")
 def startup():
@@ -771,12 +777,12 @@ class UpsertRequest(BaseModel):
 
 @app.get("/")
 def root():
-    return {"message": "Fineoteric Email Processor API", "version": "4.1.0", "docs": "/docs"}
+    return {"message": "Fineoteric Email Processor API", "version": "4.2.0", "docs": "/docs"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "4.1.0", "ml_mode": ML_MODE, "db_path": DB_PATH, "timestamp": datetime.now().isoformat()}
+    return {"status": "healthy", "version": "4.2.0", "ml_mode": ML_MODE, "db_path": DB_PATH, "timestamp": datetime.now().isoformat()}
 
 
 @app.get("/config")
