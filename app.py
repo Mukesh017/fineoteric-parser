@@ -178,7 +178,12 @@ def parse_email_html(html_body, plain_text=""):
         if records:
             return [standardize_record(r) for r in records]
 
-        # Try space-separated
+        # Try space-separated with known labels (NEW - handles 2 customers)
+        records = _parse_space_separated_v2(plain_text)
+        if records:
+            return [standardize_record(r) for r in records]
+
+        # Try old space-separated
         records = _parse_space_separated(plain_text)
         if records:
             return [standardize_record(r) for r in records]
@@ -257,7 +262,6 @@ def _parse_tab_separated(text):
             break
 
     if header_row is None:
-        # No header, assume first line is header or data starts directly
         header_row = 0
 
     # Count columns from header
@@ -272,7 +276,6 @@ def _parse_tab_separated(text):
             if len(parts) == 2:
                 key, val = parts[0].strip(), parts[1].strip()
                 _map_cell_to_field(record, key, val)
-                # Check if value looks like LAN
                 if val and (val.startswith("DRBL") or val.startswith("KH") or val.startswith("HL")):
                     record["APPLICATION NUMBER"] = val
 
@@ -291,12 +294,118 @@ def _parse_tab_separated(text):
                     key = parts[0].strip()
                     val = parts[cust_idx].strip()
                     _map_cell_to_field(record, key, val)
-                    # Check if value looks like LAN
                     if val and (val.startswith("DRBL") or val.startswith("KH") or val.startswith("HL")):
                         record["APPLICATION NUMBER"] = val
 
             if record["CUSTOMER NAME"] or record["APPLICATION NUMBER"]:
                 records.append(record)
+
+    return records if records else None
+
+
+def _parse_space_separated_v2(text):
+    """Parse space-separated text with known labels and multiple customers.
+
+    Handles format like:
+    Descriptions Status Status
+    Customer name/ Company Name KANHAIYALAL SHANKARLAL JAIN RAHUL KANHAIYLAL JAIN
+    NBFC/Bank Name Kotak Mahindra Bank Ltd Kotak Mahindra Bank Ltd
+    ...
+    """
+    records = []
+    text_clean = text.replace("\r", " ").strip()
+
+    # Known labels in order of appearance
+    KNOWN_LABELS = [
+        ("Customer name/ Company Name", ["customer", "name", "company"]),
+        ("NBFC/Bank Name", ["nbfc", "bank", "name"]),
+        ("Product", ["product"]),
+        ("DSA Name", ["dsa", "name"]),
+        ("DSA code", ["dsa", "code"]),
+        ("Sanction Amount", ["sanction", "amount"]),
+        ("Sanction Date", ["sanction", "date"]),
+        ("Disbursed Amount", ["disbursed", "amount"]),
+        ("Disbursed Date", ["disbursed", "date"]),
+        ("Disbursed Type ( part / Full )", ["disbursed", "type", "part", "full"]),
+        ("Insurance Amount (if any)", ["insurance", "amount"]),
+        ("LAN Number", ["lan", "number"]),
+        ("Subvention ( if any )", ["subvention"]),
+        ("OTC/PDD clearnce ( NA / Cleared/NO)", ["otc", "pdd", "clearance"]),
+        ("Cheque Handover Stauts ( yes / No)", ["cheque", "handover", "status"]),
+        ("Cheque Handover date", ["cheque", "handover", "date"]),
+        ("Payout", ["payout"]),
+    ]
+
+    # Find all label positions in text
+    label_positions = []
+    for label, _ in KNOWN_LABELS:
+        # Try exact match first, then fuzzy
+        idx = text_clean.find(label)
+        if idx == -1:
+            # Try lowercase
+            idx = text_clean.lower().find(label.lower())
+        if idx != -1:
+            label_positions.append((idx, label))
+
+    if len(label_positions) < 3:
+        return None  # Not enough labels found
+
+    # Sort by position
+    label_positions.sort()
+
+    # Extract values between labels
+    extracted = {}
+    for i, (pos, label) in enumerate(label_positions):
+        start = pos + len(label)
+        if i + 1 < len(label_positions):
+            end = label_positions[i + 1][0]
+        else:
+            end = len(text_clean)
+        value_text = text_clean[start:end].strip()
+        extracted[label] = value_text
+
+    # Determine number of customers by checking duplicate values
+    # If values are repeated (like "Kotak Mahindra Bank Ltd Kotak Mahindra Bank Ltd"), 
+    # we have 2 customers
+    num_customers = 1
+    for label, val in extracted.items():
+        if label in ["Product", "DSA code", "DSA Name"]:
+            # Check if value contains duplicates
+            words = val.split()
+            if len(words) >= 2:
+                # Simple heuristic: if first half == second half when split by middle
+                mid = len(words) // 2
+                first_half = " ".join(words[:mid])
+                second_half = " ".join(words[mid:])
+                if first_half == second_half:
+                    num_customers = 2
+                    break
+
+    # Build records for each customer
+    for cust_idx in range(num_customers):
+        record = dict(STANDARD_ROW)
+
+        for label, val in extracted.items():
+            words = val.split()
+
+            if num_customers == 2 and len(words) >= 2:
+                # Split value for 2 customers
+                mid = len(words) // 2
+                if cust_idx == 0:
+                    cust_val = " ".join(words[:mid])
+                else:
+                    cust_val = " ".join(words[mid:])
+            else:
+                cust_val = val
+
+            _map_cell_to_field(record, label, cust_val)
+
+            # Special: LAN Number = APPLICATION NUMBER
+            if "lan" in label.lower() and "number" in label.lower():
+                record["APPLICATION NUMBER"] = cust_val
+
+        if record["CUSTOMER NAME"] or record["APPLICATION NUMBER"]:
+            records.append(record)
 
     return records if records else None
 
@@ -625,7 +734,7 @@ def upsert_records(records):
 
 
 # ============== FASTAPI APP ==============
-app = FastAPI(title="Fineoteric Email Processor", version="4.0.0")
+app = FastAPI(title="Fineoteric Email Processor", version="4.1.0")
 
 @app.on_event("startup")
 def startup():
@@ -662,12 +771,12 @@ class UpsertRequest(BaseModel):
 
 @app.get("/")
 def root():
-    return {"message": "Fineoteric Email Processor API", "version": "4.0.0", "docs": "/docs"}
+    return {"message": "Fineoteric Email Processor API", "version": "4.1.0", "docs": "/docs"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "4.0.0", "ml_mode": ML_MODE, "db_path": DB_PATH, "timestamp": datetime.now().isoformat()}
+    return {"status": "healthy", "version": "4.1.0", "ml_mode": ML_MODE, "db_path": DB_PATH, "timestamp": datetime.now().isoformat()}
 
 
 @app.get("/config")
