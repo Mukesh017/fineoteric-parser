@@ -150,72 +150,105 @@ class MLClassifier:
 def parse_email_html(html_body, plain_text=""):
     """Parse email body and extract loan records."""
     records = []
+    debug_info = {
+        "html_body_length": len(html_body) if html_body else 0,
+        "plain_text_length": len(plain_text) if plain_text else 0,
+        "html_body_preview": html_body[:200] if html_body else "",
+        "plain_text_preview": plain_text[:200] if plain_text else "",
+        "parsers_tried": [],
+        "parser_results": {}
+    }
 
-    # PRIORITY 1: Try plain_text first (most reliable from n8n)
+    # PRIORITY 1: Try plain_text first
     if plain_text and len(plain_text.strip()) > 10:
-        records = _parse_from_text(plain_text)
+        debug_info["parsers_tried"].append("plain_text_priority")
+        records, debug = _parse_from_text(plain_text, return_debug=True)
+        debug_info["parser_results"]["plain_text"] = debug
         if records:
-            return [standardize_record(r) for r in records]
+            debug_info["final_parser"] = "plain_text"
+            return [standardize_record(r) for r in records], debug_info
 
     # PRIORITY 2: Try html_body only if it looks like real HTML
     if html_body and len(html_body.strip()) > 10:
-        # Check if html_body is actually n8n schema/table format (not real HTML)
         if _is_real_html(html_body):
-            records = _parse_from_html(html_body)
+            debug_info["parsers_tried"].append("html_body_real_html")
+            records, debug = _parse_from_html(html_body, return_debug=True)
+            debug_info["parser_results"]["html_body"] = debug
             if records:
-                return [standardize_record(r) for r in records]
+                debug_info["final_parser"] = "html_body"
+                return [standardize_record(r) for r in records], debug_info
+        else:
+            debug_info["parsers_tried"].append("html_body_skipped_not_real_html")
 
-    return records
+    debug_info["final_parser"] = "none"
+    return records, debug_info
 
 
 def _is_real_html(html_body):
     """Check if the string is actual HTML email content, not n8n schema format."""
     html_lower = html_body.lower().strip()
 
-    # If it starts with pipe characters or n8n schema markers, it's NOT real HTML
     if html_lower.startswith("|") or "| name |" in html_lower or "| type |" in html_lower:
         return False
 
-    # If it contains HTML tags, it's real HTML
     if "<html" in html_lower or "<body" in html_lower or "<table" in html_lower or "<div" in html_lower:
         return True
 
-    # If it contains < and > tags, it's probably HTML
     if "<" in html_body and ">" in html_body:
         return True
 
     return False
 
 
-def _parse_from_text(text):
+def _parse_from_text(text, return_debug=False):
     """Parse from plain text - tries all text-based parsers."""
+    debug = {"parsers_tried": [], "results": {}}
     records = []
 
     # Try tab-separated
+    debug["parsers_tried"].append("tab_separated")
     records = _parse_tab_separated(text)
+    debug["results"]["tab_separated"] = len(records) if records else 0
     if records:
+        if return_debug:
+            return records, debug
         return records
 
     # Try space-separated with known labels (handles 2 customers)
+    debug["parsers_tried"].append("space_separated_v2")
     records = _parse_space_separated_v2(text)
+    debug["results"]["space_separated_v2"] = len(records) if records else 0
     if records:
+        if return_debug:
+            return records, debug
         return records
 
     # Try old space-separated
+    debug["parsers_tried"].append("space_separated")
     records = _parse_space_separated(text)
+    debug["results"]["space_separated"] = len(records) if records else 0
     if records:
+        if return_debug:
+            return records, debug
         return records
 
     # Try colon-separated
+    debug["parsers_tried"].append("colon_separated")
     records = _parse_colon_separated(text)
+    debug["results"]["colon_separated"] = len(records) if records else 0
     if records:
+        if return_debug:
+            return records, debug
         return records
 
+    if return_debug:
+        return records, debug
     return records
 
 
-def _parse_from_html(html_body):
+def _parse_from_html(html_body, return_debug=False):
     """Parse from actual HTML content."""
+    debug = {"parsers_tried": [], "results": {}}
     records = []
 
     soup = BeautifulSoup(html_body, "html.parser")
@@ -224,20 +257,34 @@ def _parse_from_html(html_body):
     text = soup.get_text(separator="\n")
 
     # Try HTML table format
+    debug["parsers_tried"].append("html_table")
     records = _parse_html_table(soup)
+    debug["results"]["html_table"] = len(records) if records else 0
     if records:
+        if return_debug:
+            return records, debug
         return records
 
     # Try tab-separated from HTML text
+    debug["parsers_tried"].append("tab_from_html")
     records = _parse_tab_separated(text)
+    debug["results"]["tab_from_html"] = len(records) if records else 0
     if records:
+        if return_debug:
+            return records, debug
         return records
 
     # Try space-separated from HTML text
+    debug["parsers_tried"].append("space_from_html")
     records = _parse_space_separated_v2(text)
+    debug["results"]["space_from_html"] = len(records) if records else 0
     if records:
+        if return_debug:
+            return records, debug
         return records
 
+    if return_debug:
+        return records, debug
     return records
 
 
@@ -740,7 +787,7 @@ def upsert_records(records):
 
 
 # ============== FASTAPI APP ==============
-app = FastAPI(title="Fineoteric Email Processor", version="4.2.0")
+app = FastAPI(title="Fineoteric Email Processor", version="4.3.0")
 
 @app.on_event("startup")
 def startup():
@@ -777,12 +824,12 @@ class UpsertRequest(BaseModel):
 
 @app.get("/")
 def root():
-    return {"message": "Fineoteric Email Processor API", "version": "4.2.0", "docs": "/docs"}
+    return {"message": "Fineoteric Email Processor API", "version": "4.3.0", "docs": "/docs"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "4.2.0", "ml_mode": ML_MODE, "db_path": DB_PATH, "timestamp": datetime.now().isoformat()}
+    return {"status": "healthy", "version": "4.3.0", "ml_mode": ML_MODE, "db_path": DB_PATH, "timestamp": datetime.now().isoformat()}
 
 
 @app.get("/config")
@@ -800,8 +847,8 @@ def classify_email(req: ClassifyRequest):
 
 @app.post("/extract")
 def extract_email(req: ProcessRequest):
-    records = parse_email_html(req.html_body, req.plain_text)
-    return {"success": True, "record_count": len(records), "records": records}
+    records, debug_info = parse_email_html(req.html_body, req.plain_text)
+    return {"success": True, "record_count": len(records), "records": records, "debug": debug_info}
 
 
 @app.post("/validate")
@@ -833,7 +880,7 @@ def process_email(req: ProcessRequest):
     domain = req.sender.split("@")[-1].lower() if "@" in req.sender else ""
     sender_valid = True
 
-    records = parse_email_html(req.html_body, req.plain_text)
+    records, debug_info = parse_email_html(req.html_body, req.plain_text)
     valid_records, invalid_records = [], []
 
     for rec in records:
@@ -870,7 +917,7 @@ def process_email(req: ProcessRequest):
                          "extraction": {"record_count": len(records)},
                          "validation": {"valid": len(valid_records), "invalid": len(invalid_records)},
                          "upsert": upsert_results},
-            "records": valid_records}
+            "records": valid_records, "debug": debug_info}
 
 
 @app.post("/mark-read")
@@ -918,5 +965,5 @@ def review_queue():
 
 @app.post("/parse-email")
 def parse_email_legacy(req: ProcessRequest):
-    records = parse_email_html(req.html_body, req.plain_text)
-    return {"success": True, "records": records, "record_count": len(records)}
+    records, debug_info = parse_email_html(req.html_body, req.plain_text)
+    return {"success": True, "records": records, "record_count": len(records), "debug": debug_info}
